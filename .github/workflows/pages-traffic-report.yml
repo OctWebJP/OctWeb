@@ -9,9 +9,6 @@ on:
 permissions:
   issues: write
   contents: read
-  # `administration: read` is required to access the repo Traffic API
-  # via the GITHUB_TOKEN.
-  administration: read
 
 jobs:
   report:
