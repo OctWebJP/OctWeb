@@ -1,0 +1,107 @@
+name: Pages Traffic Daily Report
+
+on:
+  schedule:
+    # Runs daily at 00:10 UTC (09:10 JST)
+    - cron: '10 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+  # `administration: read` is required to access the repo Traffic API
+  # via the GITHUB_TOKEN.
+  administration: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Pages traffic report and open issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TODAY="$(date -u +%Y-%m-%d)"
+          YESTERDAY="$(date -u -d 'yesterday' +%Y-%m-%dT00:00:00Z)"
+
+          PAGES_URL="$(gh api "repos/${REPO}/pages" --jq '.html_url' 2>/dev/null || echo "(Pages not enabled)")"
+
+          VIEWS_JSON="$(gh api "repos/${REPO}/traffic/views" 2>/dev/null || echo '{}')"
+          CLONES_JSON="$(gh api "repos/${REPO}/traffic/clones" 2>/dev/null || echo '{}')"
+          PATHS_JSON="$(gh api "repos/${REPO}/traffic/popular/paths" 2>/dev/null || echo '[]')"
+          REFS_JSON="$(gh api "repos/${REPO}/traffic/popular/referrers" 2>/dev/null || echo '[]')"
+
+          VIEWS_TOTAL_14D="$(echo "$VIEWS_JSON"   | jq -r '.count   // 0')"
+          UNIQ_TOTAL_14D="$(echo  "$VIEWS_JSON"   | jq -r '.uniques // 0')"
+          CLONES_TOTAL_14D="$(echo "$CLONES_JSON" | jq -r '.count   // 0')"
+          CLONES_UNIQ_14D="$(echo  "$CLONES_JSON" | jq -r '.uniques // 0')"
+
+          YDAY_VIEWS="$(echo "$VIEWS_JSON" | jq -r --arg d "$YESTERDAY" '(.views // []) | map(select(.timestamp==$d)) | (.[0].count // 0)')"
+          YDAY_UNIQ="$(echo  "$VIEWS_JSON" | jq -r --arg d "$YESTERDAY" '(.views // []) | map(select(.timestamp==$d)) | (.[0].uniques // 0)')"
+
+          DAILY_TABLE="$(echo "$VIEWS_JSON" | jq -r '(.views // []) | .[] | "| \(.timestamp[0:10]) | \(.count) | \(.uniques) |"')"
+          [ -z "$DAILY_TABLE" ] && DAILY_TABLE="| (no data) | 0 | 0 |"
+
+          PATHS_TABLE="$(echo "$PATHS_JSON" | jq -r '.[] | "| `\(.path)` | \(.title // "") | \(.count) | \(.uniques) |"')"
+          [ -z "$PATHS_TABLE" ] && PATHS_TABLE="| (no data) | | 0 | 0 |"
+
+          REFS_TABLE="$(echo "$REFS_JSON" | jq -r '.[] | "| \(.referrer) | \(.count) | \(.uniques) |"')"
+          [ -z "$REFS_TABLE" ] && REFS_TABLE="| (no data) | 0 | 0 |"
+
+          BODY_FILE="$(mktemp)"
+          {
+            echo "# 📊 GitHub Pages Traffic Report — ${TODAY}"
+            echo
+            echo "**Repository:** \`${REPO}\`  "
+            echo "**Pages URL:** ${PAGES_URL}  "
+            echo "**Report period:** rolling 14-day window (GitHub Traffic API)  "
+            echo "**Generated (UTC):** $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo
+            echo "> ⚠️ GitHub Pages does not expose raw HTTP access logs. This report uses the repository Traffic API as the closest available proxy. \"Views\" approximate page accesses to the repo and its associated Pages site."
+            echo
+            echo "## Yesterday (${YESTERDAY%T*})"
+            echo
+            echo "- **Views:** ${YDAY_VIEWS}"
+            echo "- **Unique visitors:** ${YDAY_UNIQ}"
+            echo
+            echo "## 14-day totals"
+            echo
+            echo "| Metric | Total | Unique |"
+            echo "|---|---:|---:|"
+            echo "| Views  | ${VIEWS_TOTAL_14D}  | ${UNIQ_TOTAL_14D} |"
+            echo "| Clones | ${CLONES_TOTAL_14D} | ${CLONES_UNIQ_14D} |"
+            echo
+            echo "## Daily views (last 14 days)"
+            echo
+            echo "| Date | Views | Unique |"
+            echo "|---|---:|---:|"
+            echo "$DAILY_TABLE"
+            echo
+            echo "## Top paths"
+            echo
+            echo "| Path | Title | Views | Unique |"
+            echo "|---|---|---:|---:|"
+            echo "$PATHS_TABLE"
+            echo
+            echo "## Top referrers"
+            echo
+            echo "| Referrer | Views | Unique |"
+            echo "|---|---:|---:|"
+            echo "$REFS_TABLE"
+            echo
+            echo "---"
+            echo "_Automated by \`.github/workflows/pages-traffic-report.yml\`_"
+          } > "$BODY_FILE"
+
+          TITLE="📊 Pages traffic report — ${TODAY}"
+
+          # Ensure label exists (ignore failure if it already does)
+          gh label create "pages-traffic" --color "0E8A16" --description "Daily GitHub Pages traffic report" --repo "$REPO" 2>/dev/null || true
+
+          gh issue create \
+            --repo "$REPO" \
+            --title "$TITLE" \
+            --label "pages-traffic" \
+            --body-file "$BODY_FILE"
