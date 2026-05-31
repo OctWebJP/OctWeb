@@ -1,112 +1,32 @@
-name: Pages Traffic Daily Report
+name: Daily Pages Traffic Report
 
 on:
   schedule:
-    # Runs daily at 00:10 UTC (09:10 JST)
-    - cron: '10 0 * * *'
+    # 00:00 UTC = 09:00 JST
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 permissions:
-  issues: write
   contents: read
+  issues: write
 
 jobs:
   report:
     runs-on: ubuntu-latest
     steps:
-      - name: Generate Pages traffic report and open issue
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Generate report and open issue
         env:
-          # PAT with `repo` scope is required because the Traffic API
-          # needs push access to the repository — GITHUB_TOKEN cannot
-          # access /traffic endpoints.
-          GH_TOKEN: ${{ secrets.PAGES_TRAFFIC_TOKEN }}
-          ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          TODAY="$(date -u +%Y-%m-%d)"
-          YESTERDAY_TS="$(date -u -d 'yesterday' +%Y-%m-%dT00:00:00Z)"
-          YESTERDAY_DATE="${YESTERDAY_TS%T*}"
-
-          PAGES_URL="$(gh api "repos/${REPO}/pages" --jq '.html_url' 2>/dev/null || echo '(Pages not enabled)')"
-
-          VIEWS_TOTAL_14D="$(gh api "repos/${REPO}/traffic/views" --jq '.count // 0')"
-          UNIQ_TOTAL_14D="$(gh api "repos/${REPO}/traffic/views" --jq '.uniques // 0')"
-          CLONES_TOTAL_14D="$(gh api "repos/${REPO}/traffic/clones" --jq '.count // 0')"
-          CLONES_UNIQ_14D="$(gh api "repos/${REPO}/traffic/clones" --jq '.uniques // 0')"
-
-          YDAY_VIEWS="$(gh api "repos/${REPO}/traffic/views" \
-            --jq "(.views // []) | map(select(.timestamp==\"${YESTERDAY_TS}\")) | (.[0].count // 0)")"
-          YDAY_UNIQ="$(gh api "repos/${REPO}/traffic/views" \
-            --jq "(.views // []) | map(select(.timestamp==\"${YESTERDAY_TS}\")) | (.[0].uniques // 0)")"
-
-          DAILY_TABLE="$(gh api "repos/${REPO}/traffic/views" \
-            --jq '(.views // []) | .[] | "| \(.timestamp[0:10]) | \(.count) | \(.uniques) |"')"
-          [ -z "$DAILY_TABLE" ] && DAILY_TABLE="| (no data) | 0 | 0 |"
-
-          PATHS_TABLE="$(gh api "repos/${REPO}/traffic/popular/paths" \
-            --jq '.[] | "| `\(.path)` | \(.title // "") | \(.count) | \(.uniques) |"')"
-          [ -z "$PATHS_TABLE" ] && PATHS_TABLE="| (no data) | | 0 | 0 |"
-
-          REFS_TABLE="$(gh api "repos/${REPO}/traffic/popular/referrers" \
-            --jq '.[] | "| \(.referrer) | \(.count) | \(.uniques) |"')"
-          [ -z "$REFS_TABLE" ] && REFS_TABLE="| (no data) | 0 | 0 |"
-
-          BODY_FILE="$(mktemp)"
-          {
-            echo "# 📊 GitHub Pages Traffic Report — ${TODAY}"
-            echo
-            echo "**Repository:** \`${REPO}\`  "
-            echo "**Pages URL:** ${PAGES_URL}  "
-            echo "**Report period:** rolling 14-day window (GitHub Traffic API)  "
-            echo "**Generated (UTC):** $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            echo
-            echo "> ⚠️ GitHub Pages does not expose raw HTTP access logs. This report uses the repository Traffic API as the closest available proxy. \"Views\" approximate page accesses to the repo and its associated Pages site."
-            echo
-            echo "## Yesterday (${YESTERDAY_DATE})"
-            echo
-            echo "- **Views:** ${YDAY_VIEWS}"
-            echo "- **Unique visitors:** ${YDAY_UNIQ}"
-            echo
-            echo "## 14-day totals"
-            echo
-            echo "| Metric | Total | Unique |"
-            echo "|---|---:|---:|"
-            echo "| Views  | ${VIEWS_TOTAL_14D}  | ${UNIQ_TOTAL_14D} |"
-            echo "| Clones | ${CLONES_TOTAL_14D} | ${CLONES_UNIQ_14D} |"
-            echo
-            echo "## Daily views (last 14 days)"
-            echo
-            echo "| Date | Views | Unique |"
-            echo "|---|---:|---:|"
-            echo "$DAILY_TABLE"
-            echo
-            echo "## Top paths"
-            echo
-            echo "| Path | Title | Views | Unique |"
-            echo "|---|---|---:|---:|"
-            echo "$PATHS_TABLE"
-            echo
-            echo "## Top referrers"
-            echo
-            echo "| Referrer | Views | Unique |"
-            echo "|---|---:|---:|"
-            echo "$REFS_TABLE"
-            echo
-            echo "---"
-            echo "_Automated by \`.github/workflows/pages-traffic-report.yml\`_"
-          } > "$BODY_FILE"
-
-          TITLE="📊 Pages traffic report — ${TODAY}"
-
-          # Use GITHUB_TOKEN for issue creation (avoids consuming PAT rate limit)
-          GH_TOKEN="$ISSUE_TOKEN" gh label create "pages-traffic" \
-            --color "0E8A16" \
-            --description "Daily GitHub Pages traffic report" \
-            --repo "$REPO" 2>/dev/null || true
-
-          GH_TOKEN="$ISSUE_TOKEN" gh issue create \
-            --repo "$REPO" \
-            --title "$TITLE" \
-            --label "pages-traffic" \
-            --body-file "$BODY_FILE"
+          # PAT (classic `repo` scope, OR fine-grained with
+          # Administration:read on all Pages repos in the org AND
+          # Issues:write on this repo). The default GITHUB_TOKEN
+          # cannot read traffic of *other* repos in the org.
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+          ORG: OctWebJP
+          ISSUE_REPO: OctWeb
+        run: python scripts/pages_traffic_report.py
