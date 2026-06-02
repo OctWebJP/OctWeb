@@ -26,7 +26,11 @@ jobs:
           # Administration:read on all Pages repos in the org AND
           # Issues:write on this repo). The default GITHUB_TOKEN
           # cannot read traffic of *other* repos in the org.
-          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+          # Prefer a PAT (TRAFFIC_TOKEN) so we can read traffic for every
+          # Pages repo in the org. If it's unset/expired, fall back to the
+          # built-in GITHUB_TOKEN so the workflow still produces a report
+          # for repos the default token can access (at minimum, this repo).
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN || secrets.GITHUB_TOKEN }}
           ORG: OctWebJP
           ISSUE_REPO: OctWeb
         run: python scripts/pages_traffic_report.py

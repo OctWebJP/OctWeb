@@ -130,15 +130,19 @@ def build_report() -> tuple[str, str]:
         p = gh(f"/repos/{full}/traffic/popular/paths")
         r = gh(f"/repos/{full}/traffic/popular/referrers")
 
-        vt = v.get("count", 0) if isinstance(v, dict) else 0
-        vu = v.get("uniques", 0) if isinstance(v, dict) else 0
-        ct = c.get("count", 0) if isinstance(c, dict) else 0
-        cu = c.get("uniques", 0) if isinstance(c, dict) else 0
+        vt = v.get("count", 0) if isinstance(v, dict) and "_error" not in v else 0
+        vu = v.get("uniques", 0) if isinstance(v, dict) and "_error" not in v else 0
+        ct = c.get("count", 0) if isinstance(c, dict) and "_error" not in c else 0
+        cu = c.get("uniques", 0) if isinstance(c, dict) and "_error" not in c else 0
+
+        note = ""
+        if isinstance(v, dict) and v.get("_error"):
+            note = f" ⚠️ traffic unavailable: `{v['_error'][:80]}`"
 
         summary.append(
             f"| [{name}](https://github.com/{full}) | "
             f"{(f'[{url}]({url})' if url else '_n/a_')} | "
-            f"{vt} | {vu} | {ct} | {cu} |"
+            f"{vt} | {vu} | {ct} | {cu} |{note}"
         )
 
         details.extend([
