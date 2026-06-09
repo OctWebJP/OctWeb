@@ -1,14 +1,14 @@
-name: Daily Pages Traffic Report
+name: GitHub Pages Traffic Report
 
 on:
   schedule:
-    # 00:00 UTC = 09:00 JST
-    - cron: "0 0 * * *"
+    # Daily at 09:00 UTC (18:00 JST)
+    - cron: '0 9 * * *'
   workflow_dispatch:
 
 permissions:
-  contents: read
   issues: write
+  contents: read
 
 jobs:
   report:
@@ -16,21 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      - name: Generate report and open issue
+      - name: Generate report and create issue
         env:
-          # PAT (classic `repo` scope, OR fine-grained with
-          # Administration:read on all Pages repos in the org AND
-          # Issues:write on this repo). The default GITHUB_TOKEN
-          # cannot read traffic of *other* repos in the org.
-          # Prefer a PAT (TRAFFIC_TOKEN) so we can read traffic for every
-          # Pages repo in the org. If it's unset/expired, fall back to the
-          # built-in GITHUB_TOKEN so the workflow still produces a report
-          # for repos the default token can access (at minimum, this repo).
-          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN || secrets.GITHUB_TOKEN }}
+          # PAT with `repo` scope on org repos (needed for cross-repo traffic API).
+          # Falls back to GITHUB_TOKEN (only works for this repo).
+          GH_TRAFFIC_TOKEN: ${{ secrets.ORG_TRAFFIC_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ORG: OctWebJP
-          ISSUE_REPO: OctWeb
-        run: python scripts/pages_traffic_report.py
+          ISSUE_REPO: ${{ github.repository }}
+        run: python .github/scripts/pages_traffic_report.py
