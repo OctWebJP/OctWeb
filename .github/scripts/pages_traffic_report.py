@@ -17,6 +17,9 @@ from datetime import datetime, timezone
 API = "https://api.github.com"
 
 
+DENIED: set[str] = set()
+
+
 def gh(path: str, token: str) -> dict | list | None:
     req = urllib.request.Request(
         f"{API}{path}",
@@ -31,6 +34,11 @@ def gh(path: str, token: str) -> dict | list | None:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
+        if e.code in (401, 403) and "/traffic/" in path:
+            # path looks like /repos/{org}/{repo}/traffic/...
+            parts = path.strip("/").split("/")
+            if len(parts) >= 3:
+                DENIED.add(f"{parts[1]}/{parts[2]}")
         print(f"  ! {path} -> HTTP {e.code}: {e.read().decode()[:200]}", file=sys.stderr)
         return None
     except Exception as e:
@@ -137,6 +145,18 @@ def main() -> int:
         f"- **Total views:** {totals_views}",
         f"- **Total unique visitors:** {totals_unique}",
         f"- **Pages-enabled repos analyzed:** {len(repos)}",
+    ]
+    if DENIED:
+        denied_list = ", ".join(f"`{r}`" for r in sorted(DENIED))
+        body_parts += [
+            "",
+            "> ⚠️ **Traffic access denied for:** " + denied_list + ".  ",
+            "> The workflow's `GITHUB_TOKEN` can only read traffic for the repo it "
+            "runs in. To include other org repos, create a PAT with `repo` scope "
+            "(or a fine-grained token with **Administration: read** on those repos) "
+            "and add it as the `ORG_TRAFFIC_TOKEN` secret on this repo.",
+        ]
+    body_parts += [
         "",
         "## Per-repo breakdown",
         "",
