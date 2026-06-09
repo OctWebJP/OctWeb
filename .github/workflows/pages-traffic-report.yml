@@ -9,6 +9,10 @@ on:
 permissions:
   issues: write
   contents: read
+  # Required for the Traffic API (views/clones/popular paths/referrers).
+  # Only grants access to THIS repo. For cross-repo traffic in the org,
+  # set the ORG_TRAFFIC_TOKEN secret to a PAT with `repo` scope.
+  administration: read
 
 jobs:
   report:
