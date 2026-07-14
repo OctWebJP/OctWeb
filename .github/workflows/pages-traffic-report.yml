@@ -1,8 +1,9 @@
-name: Daily GitHub Pages Access Report
+name: Daily Pages Traffic Report
 
 on:
   schedule:
-    - cron: '0 0 * * *'   # 00:00 UTC daily (≈ 09:00 JST)
+    # 09:00 JST = 00:00 UTC
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 permissions:
@@ -12,96 +13,71 @@ permissions:
 jobs:
   report:
     runs-on: ubuntu-latest
-    env:
-      ORG: OctWebJP
-      REPOS: "hanasaki shionoya OctWeb"
-      # TRAFFIC_TOKEN must be a PAT (classic: `repo`, or fine-grained with
-      # "Administration: read" + "Metadata: read" on all 3 repos) so that
-      # traffic for hanasaki / shionoya can be read from this repo.
-      # Falls back to GITHUB_TOKEN (only OctWeb's own traffic will be readable).
-      GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
-      - name: Generate report
+      - name: Collect traffic and file issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          DATE="$(date -u +%Y-%m-%d)"
-          OUT="report.md"
-          {
-            echo "# 📊 GitHub Pages Access Report — ${DATE}"
-            echo
-            echo "Daily analysis of GitHub Pages traffic for **${ORG}**."
-            echo "Source: GitHub Repository Traffic API (rolling 14-day window). GitHub Pages does not expose raw access logs; views/uniques/paths/referrers are the official proxy."
-            echo
-            echo "## Summary (last 14 days)"
-            echo
-            echo "| Repo | Pages URL | Views | Uniques | Clones | Unique Cloners |"
-            echo "|------|-----------|------:|--------:|-------:|---------------:|"
-          } > "$OUT"
+          DATE=$(date -u -d 'yesterday' +%Y-%m-%d)
+          TODAY=$(TZ=Asia/Tokyo date +%Y-%m-%d)
 
-          total_v=0; total_u=0
-          for r in $REPOS; do
-            v=$(gh api "repos/${ORG}/${r}/traffic/views" 2>/dev/null || echo '{}')
-            c=$(gh api "repos/${ORG}/${r}/traffic/clones" 2>/dev/null || echo '{}')
-            p=$(gh api "repos/${ORG}/${r}/pages" 2>/dev/null || echo '{}')
-            url=$(echo "$p" | jq -r '.html_url // "N/A"')
-            vc=$(echo "$v" | jq -r '.count // 0'); vu=$(echo "$v" | jq -r '.uniques // 0')
-            cc=$(echo "$c" | jq -r '.count // 0'); cu=$(echo "$c" | jq -r '.uniques // 0')
-            echo "| \`${r}\` | ${url} | ${vc} | ${vu} | ${cc} | ${cu} |" >> "$OUT"
-            total_v=$((total_v + vc)); total_u=$((total_u + vu))
-          done
-          echo >> "$OUT"
+          views=$(gh api "/repos/$REPO/traffic/views")
+          clones=$(gh api "/repos/$REPO/traffic/clones")
+          paths=$(gh api "/repos/$REPO/traffic/popular/paths")
+          refs=$(gh api "/repos/$REPO/traffic/popular/referrers")
+          pages=$(gh api "/repos/$REPO/pages" 2>/dev/null || echo '{}')
+          site_url=$(echo "$pages" | jq -r '.html_url // "(unknown)"')
 
-          for r in $REPOS; do
-            echo "## \`${r}\`" >> "$OUT"; echo >> "$OUT"
-            views=$(gh api "repos/${ORG}/${r}/traffic/views" 2>/dev/null || echo '{}')
-            paths=$(gh api "repos/${ORG}/${r}/traffic/popular/paths" 2>/dev/null || echo '[]')
-            refs=$(gh api "repos/${ORG}/${r}/traffic/popular/referrers" 2>/dev/null || echo '[]')
-
-            echo "### Daily views (last 14 days)" >> "$OUT"; echo >> "$OUT"
-            echo "| Date | Views | Uniques |" >> "$OUT"
-            echo "|------|------:|--------:|" >> "$OUT"
-            echo "$views" | jq -r '.views[]? | "| \(.timestamp[0:10]) | \(.count) | \(.uniques) |"' >> "$OUT" || true
-            echo >> "$OUT"
-
-            echo "### Top paths" >> "$OUT"; echo >> "$OUT"
-            if [ "$(echo "$paths" | jq 'length')" = "0" ]; then
-              echo "_No path data available._" >> "$OUT"
-            else
-              echo "| Path | Views | Uniques |" >> "$OUT"
-              echo "|------|------:|--------:|" >> "$OUT"
-              echo "$paths" | jq -r '.[] | "| `\(.path)` | \(.count) | \(.uniques) |"' >> "$OUT"
-            fi
-            echo >> "$OUT"
-
-            echo "### Top referrers" >> "$OUT"; echo >> "$OUT"
-            if [ "$(echo "$refs" | jq 'length')" = "0" ]; then
-              echo "_No referrer data available._" >> "$OUT"
-            else
-              echo "| Referrer | Views | Uniques |" >> "$OUT"
-              echo "|----------|------:|--------:|" >> "$OUT"
-              echo "$refs" | jq -r '.[] | "| \(.referrer) | \(.count) | \(.uniques) |"' >> "$OUT"
-            fi
-            echo >> "$OUT"
-          done
+          v_total=$(echo "$views" | jq '.count')
+          v_uniq=$(echo "$views" | jq '.uniques')
+          c_total=$(echo "$clones" | jq '.count')
+          c_uniq=$(echo "$clones" | jq '.uniques')
+          y_row=$(echo "$views" | jq --arg d "$DATE" '.views[] | select(.timestamp | startswith($d))')
+          y_count=$(echo "$y_row" | jq -r '.count // 0')
+          y_uniq=$(echo "$y_row" | jq -r '.uniques // 0')
 
           {
-            echo "## Analysis"
+            echo "# 📊 GitHub Pages Traffic Report — $TODAY (JST)"
             echo
-            echo "- **Total views (14d):** ${total_v}"
-            echo "- **Total unique visitors (14d):** ${total_u}"
-            if [ "$total_v" -eq 0 ]; then
-              echo "- All sites show **zero recorded traffic** in the 14-day window. Consider adding inbound links, sitemaps, and sharing Pages URLs to drive discovery."
-            fi
+            echo "**Site:** $site_url"
+            echo "**Repo:** \`$REPO\`"
+            echo "**Source:** GitHub Repository Traffic API (Pages does not expose raw access logs)."
+            echo
+            echo "## Yesterday ($DATE UTC)"
+            echo "- Page views: **$y_count**"
+            echo "- Unique visitors: **$y_uniq**"
+            echo
+            echo "## Trailing 14 days"
+            echo "- Total views: **$v_total** (unique: **$v_uniq**)"
+            echo "- Total clones: **$c_total** (unique: **$c_uniq**)"
+            echo
+            echo "## Views per day"
+            echo "| Date (UTC) | Views | Uniques |"
+            echo "|---|---:|---:|"
+            echo "$views" | jq -r '.views[] | "| \(.timestamp[0:10]) | \(.count) | \(.uniques) |"'
+            echo
+            echo "## Top paths (14d)"
+            echo "| Path | Views | Uniques |"
+            echo "|---|---:|---:|"
+            echo "$paths" | jq -r '.[] | "| `\(.path)` | \(.count) | \(.uniques) |"' | head -20
+            echo
+            echo "## Top referrers (14d)"
+            echo "| Referrer | Views | Uniques |"
+            echo "|---|---:|---:|"
+            echo "$refs" | jq -r '.[] | "| \(.referrer) | \(.count) | \(.uniques) |"' | head -20
             echo
             echo "---"
             echo "_Generated automatically by \`.github/workflows/pages-traffic-report.yml\`._"
-          } >> "$OUT"
+          } > body.md
 
-      - name: Create issue
-        run: |
-          set -euo pipefail
-          DATE="$(date -u +%Y-%m-%d)"
           gh issue create \
-            --repo "${{ github.repository }}" \
-            --title "📊 GitHub Pages Access Report — ${DATE}" \
-            --body-file report.md
+            --repo "$REPO" \
+            --title "📊 Pages traffic report – $TODAY" \
+            --body-file body.md \
+            --label "pages-report" || \
+          gh issue create \
+            --repo "$REPO" \
+            --title "📊 Pages traffic report – $TODAY" \
+            --body-file body.md
