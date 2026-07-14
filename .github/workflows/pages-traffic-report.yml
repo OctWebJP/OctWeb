@@ -2,12 +2,11 @@ name: Daily Pages Traffic Report
 
 on:
   schedule:
-    # 09:00 JST = 00:00 UTC
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *'   # 09:00 JST
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   issues: write
 
 jobs:
@@ -16,10 +15,17 @@ jobs:
     steps:
       - name: Collect traffic and file issue
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # TRAFFIC_PAT must be a fine-grained or classic PAT with repo/traffic
+          # (push) access. GITHUB_TOKEN cannot read the Traffic API.
+          GH_TOKEN: ${{ secrets.TRAFFIC_PAT }}
+          ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::Secret TRAFFIC_PAT is not set. Create a PAT with repo/traffic access and add it as a repository or organization secret named TRAFFIC_PAT."
+            exit 1
+          fi
           DATE=$(date -u -d 'yesterday' +%Y-%m-%d)
           TODAY=$(TZ=Asia/Tokyo date +%Y-%m-%d)
 
@@ -43,7 +49,7 @@ jobs:
             echo
             echo "**Site:** $site_url"
             echo "**Repo:** \`$REPO\`"
-            echo "**Source:** GitHub Repository Traffic API (Pages does not expose raw access logs)."
+            echo "**Source:** GitHub Repository Traffic API (Pages does not expose raw HTTP access logs)."
             echo
             echo "## Yesterday ($DATE UTC)"
             echo "- Page views: **$y_count**"
@@ -72,12 +78,8 @@ jobs:
             echo "_Generated automatically by \`.github/workflows/pages-traffic-report.yml\`._"
           } > body.md
 
-          gh issue create \
+          GH_TOKEN="$ISSUE_TOKEN" gh issue create \
             --repo "$REPO" \
             --title "📊 Pages traffic report – $TODAY" \
             --body-file body.md \
-            --label "pages-report" || \
-          gh issue create \
-            --repo "$REPO" \
-            --title "📊 Pages traffic report – $TODAY" \
-            --body-file body.md
+            --label "pages-report"
