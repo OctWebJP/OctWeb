@@ -16,53 +16,73 @@ jobs:
       - name: Fetch traffic data and open issue
         uses: actions/github-script@v7
         with:
+          # If PAGES_TRAFFIC_TOKEN (PAT with `administration:read` + `issues:write`)
+          # is set, use it — it's the only way to read the Traffic API. Otherwise
+          # fall back to GITHUB_TOKEN, which can still open the daily issue but
+          # will note that traffic data is unavailable.
+          github-token: ${{ secrets.PAGES_TRAFFIC_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const owner = context.repo.owner;
             const repo  = context.repo.repo;
+            const hasPat = !!process.env.HAS_PAT;
+
+            const safe = (p) => p.then(r => ({ ok: true, data: r.data }))
+                                 .catch(e => ({ ok: false, status: e.status, message: e.message }));
 
             const [views, clones, refs, paths, pages] = await Promise.all([
-              github.rest.repos.getViews({ owner, repo }),
-              github.rest.repos.getClones({ owner, repo }),
-              github.rest.repos.getTopReferrers({ owner, repo }),
-              github.rest.repos.getTopPaths({ owner, repo }),
-              github.rest.repos.getPages({ owner, repo }).catch(() => null),
+              safe(github.rest.repos.getViews({ owner, repo })),
+              safe(github.rest.repos.getClones({ owner, repo })),
+              safe(github.rest.repos.getTopReferrers({ owner, repo })),
+              safe(github.rest.repos.getTopPaths({ owner, repo })),
+              safe(github.rest.repos.getPages({ owner, repo })),
             ]);
 
             const today = new Date().toISOString().slice(0, 10);
-            const site  = pages?.data?.html_url || `https://${owner.toLowerCase()}.github.io/${repo}/`;
+            const site  = pages.ok && pages.data?.html_url
+              ? pages.data.html_url
+              : `https://${owner.toLowerCase()}.github.io/${repo}/`;
 
             const table = (rows, cols) =>
-              rows.length === 0
+              !rows || rows.length === 0
                 ? '_No data._'
                 : [
                     '| ' + cols.map(c => c.h).join(' | ') + ' |',
                     '| ' + cols.map(() => '---').join(' | ') + ' |',
-                    ...rows.map(r => '| ' + cols.map(c => String(r[c.k])).join(' | ') + ' |'),
+                    ...rows.map(r => '| ' + cols.map(c => String(r[c.k] ?? '')).join(' | ') + ' |'),
                   ].join('\n');
 
-            const viewRows = views.data.views.slice(-14).map(v => ({
-              date: v.timestamp.slice(0, 10),
-              count: v.count,
-              uniques: v.uniques,
-            }));
-            const cloneRows = clones.data.clones.slice(-14).map(v => ({
-              date: v.timestamp.slice(0, 10),
-              count: v.count,
-              uniques: v.uniques,
-            }));
+            const viewRows = views.ok
+              ? views.data.views.slice(-14).map(v => ({ date: v.timestamp.slice(0,10), count: v.count, uniques: v.uniques }))
+              : [];
+            const cloneRows = clones.ok
+              ? clones.data.clones.slice(-14).map(v => ({ date: v.timestamp.slice(0,10), count: v.count, uniques: v.uniques }))
+              : [];
 
-            const body = [
-              `# GitHub Pages Traffic Report — ${today}`,
-              ``,
-              `**Site:** ${site}`,
-              `**Repo:** \`${owner}/${repo}\``,
-              ``,
-              `> GitHub Pages does not expose raw HTTP access logs. This report uses the repository Traffic API, which is the standard proxy for Pages analytics (14-day rolling window).`,
-              ``,
-              `## Summary (last 14 days)`,
-              `- **Views:** ${views.data.count} total, ${views.data.uniques} unique visitors`,
-              `- **Clones:** ${clones.data.count} total, ${clones.data.uniques} unique cloners`,
-              ``,
+            const trafficAvailable = views.ok && clones.ok && refs.ok && paths.ok;
+            const failures = [views, clones, refs, paths]
+              .filter(x => !x.ok)
+              .map(x => `- ${x.status}: ${x.message}`);
+
+            const notice = trafficAvailable
+              ? `> ℹ️ GitHub Pages does not expose raw HTTP access logs. This report uses the repository Traffic API — the standard proxy for Pages analytics (14-day rolling window).`
+              : [
+                  `> ⚠️ **Traffic data unavailable.** The Traffic API requires \`administration:read\`, which the default \`GITHUB_TOKEN\` cannot grant.`,
+                  `>`,
+                  `> **To enable this report:** create a fine-grained PAT with **Administration: Read** and **Issues: Read & write** on this repo, then add it as a repository secret named \`PAGES_TRAFFIC_TOKEN\`.`,
+                  `>`,
+                  `> API errors:`,
+                  ...failures.map(f => `> ${f}`),
+                ].join('\n');
+
+            const summary = trafficAvailable
+              ? [
+                  `## Summary (last 14 days)`,
+                  `- **Views:** ${views.data.count} total, ${views.data.uniques} unique visitors`,
+                  `- **Clones:** ${clones.data.count} total, ${clones.data.uniques} unique cloners`,
+                ].join('\n')
+              : `## Summary\n_Traffic data unavailable — see notice above._`;
+
+            const sections = trafficAvailable ? [
               `## Daily Views`,
               table(viewRows, [
                 { h: 'Date', k: 'date' },
@@ -91,18 +111,30 @@ jobs:
                 { h: 'Clones', k: 'count' },
                 { h: 'Uniques', k: 'uniques' },
               ]),
+            ].join('\n') : '';
+
+            const body = [
+              `# GitHub Pages Traffic Report — ${today}`,
+              ``,
+              `**Site:** ${site}`,
+              `**Repo:** \`${owner}/${repo}\``,
+              ``,
+              notice,
+              ``,
+              summary,
+              ``,
+              sections,
               ``,
               `_Generated by \`.github/workflows/pages-traffic-report.yml\`._`,
             ].join('\n');
 
-            // Ensure label exists
             try {
               await github.rest.issues.getLabel({ owner, repo, name: 'pages-traffic' });
             } catch {
               await github.rest.issues.createLabel({
                 owner, repo, name: 'pages-traffic', color: '0e8a16',
                 description: 'Daily GitHub Pages traffic analysis',
-              });
+              }).catch(() => {});
             }
 
             await github.rest.issues.create({
