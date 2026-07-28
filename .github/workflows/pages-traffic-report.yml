@@ -2,31 +2,95 @@ name: Daily GitHub Pages Traffic Report
 
 on:
   schedule:
-    - cron: '15 6 * * *'
+    - cron: '5 0 * * *'  # 00:05 UTC every day
   workflow_dispatch:
 
 permissions:
-  contents: read
   issues: write
+  contents: read
 
 jobs:
   report:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate org-wide Pages traffic report and open issue
+      - name: Generate traffic report and open issue
         env:
-          # Traffic API requires `administration:read` — GITHUB_TOKEN cannot grant
-          # this across the org, so a PAT is required. Create a fine-grained PAT
-          # with Administration: Read on all OctWebJP repos + Issues: Read/Write
-          # on OctWeb, then add it as a repo secret named PAGES_TRAFFIC_TOKEN.
-          GH_TOKEN: ${{ secrets.PAGES_TRAFFIC_TOKEN }}
+          # PAT with `repo` scope on all Pages-enabled repos (traffic API requires push access).
+          # Falls back to GITHUB_TOKEN, which only works for this repo.
+          GH_TOKEN: ${{ secrets.TRAFFIC_READ_TOKEN || secrets.GITHUB_TOKEN }}
           ORG: OctWebJP
-          ISSUE_REPO: OctWeb
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::PAGES_TRAFFIC_TOKEN secret is not set. The Traffic API needs a PAT with administration:read."
-            exit 1
+          set -euo pipefail
+          DATE=$(date -u +%Y-%m-%d)
+          REPORT=$(mktemp)
+
+          {
+            echo "# GitHub Pages traffic report — ${DATE}"
+            echo
+            echo "Source: GitHub Traffic API (\`/repos/{owner}/{repo}/traffic/*\`). GitHub Pages does not expose raw access logs; this is the closest equivalent GitHub provides. Traffic data covers the last 14 days."
+            echo
+          } > "$REPORT"
+
+          # Discover pages-enabled repos in the org
+          REPOS=$(gh api --paginate "orgs/${ORG}/repos" --jq '.[] | select(.has_pages==true) | .name')
+
+          if [ -z "$REPOS" ]; then
+            echo "_No GitHub Pages sites found in \`${ORG}\`._" >> "$REPORT"
           fi
-          python3 scripts/pages_traffic_report.py
+
+          for repo in $REPOS; do
+            echo "Processing $repo..."
+            VIEWS=$(gh api "repos/${ORG}/${repo}/traffic/views" 2>/dev/null || echo '{}')
+            CLONES=$(gh api "repos/${ORG}/${repo}/traffic/clones" 2>/dev/null || echo '{}')
+            REFS=$(gh api "repos/${ORG}/${repo}/traffic/popular/referrers" 2>/dev/null || echo '[]')
+            PATHS=$(gh api "repos/${ORG}/${repo}/traffic/popular/paths" 2>/dev/null || echo '[]')
+
+            V_TOTAL=$(echo "$VIEWS" | jq -r '.count // 0')
+            V_UNIQ=$(echo "$VIEWS" | jq -r '.uniques // 0')
+            YESTERDAY=$(date -u -d 'yesterday' +%Y-%m-%d 2>/dev/null || date -u -v-1d +%Y-%m-%d)
+            V_Y=$(echo "$VIEWS" | jq -r --arg d "$YESTERDAY" '[.views[]? | select(.timestamp|startswith($d))] | (.[0].count // 0)')
+            VU_Y=$(echo "$VIEWS" | jq -r --arg d "$YESTERDAY" '[.views[]? | select(.timestamp|startswith($d))] | (.[0].uniques // 0)')
+
+            {
+              echo "## ${ORG}/${repo}"
+              echo "- Site: https://${ORG,,}.github.io/${repo}/"
+              echo "- Views (14d): **${V_TOTAL}** total, **${V_UNIQ}** unique visitors"
+              echo "- Views (${YESTERDAY}): **${V_Y}** total, **${VU_Y}** unique"
+              echo "- Clones (14d): **$(echo "$CLONES" | jq -r '.count // 0')** total, **$(echo "$CLONES" | jq -r '.uniques // 0')** unique"
+              echo
+              echo "### Top referrers (14d)"
+              REF_TBL=$(echo "$REFS" | jq -r '.[] | "| \(.referrer) | \(.count) | \(.uniques) |"')
+              if [ -n "$REF_TBL" ]; then
+                echo "| Referrer | Views | Unique |"
+                echo "|---|---:|---:|"
+                echo "$REF_TBL"
+              else
+                echo "_No referrer data._"
+              fi
+              echo
+              echo "### Top paths (14d)"
+              PATH_TBL=$(echo "$PATHS" | jq -r '.[] | "| `\(.path)` | \(.title // "") | \(.count) | \(.uniques) |"')
+              if [ -n "$PATH_TBL" ]; then
+                echo "| Path | Title | Views | Unique |"
+                echo "|---|---|---:|---:|"
+                echo "$PATH_TBL"
+              else
+                echo "_No path data._"
+              fi
+              echo
+              echo "### Daily views (14d)"
+              echo "| Date | Views | Unique |"
+              echo "|---|---:|---:|"
+              echo "$VIEWS" | jq -r '.views[]? | "| \(.timestamp[0:10]) | \(.count) | \(.uniques) |"'
+              echo
+            } >> "$REPORT"
+          done
+
+          echo "--- report follows ---"
+          cat "$REPORT"
+
+          gh issue create \
+            --repo "${ORG}/OctWeb" \
+            --title "Pages traffic report — ${DATE}" \
+            --label "traffic-report" \
+            --body-file "$REPORT"
