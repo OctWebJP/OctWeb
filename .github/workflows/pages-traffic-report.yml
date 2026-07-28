@@ -40,10 +40,11 @@ jobs:
 
           for repo in $REPOS; do
             echo "Processing $repo..."
-            VIEWS=$(gh api "repos/${ORG}/${repo}/traffic/views" 2>/dev/null || echo '{}')
-            CLONES=$(gh api "repos/${ORG}/${repo}/traffic/clones" 2>/dev/null || echo '{}')
-            REFS=$(gh api "repos/${ORG}/${repo}/traffic/popular/referrers" 2>/dev/null || echo '[]')
-            PATHS=$(gh api "repos/${ORG}/${repo}/traffic/popular/paths" 2>/dev/null || echo '[]')
+            fetch() { local out; if out=$(gh api "$1" 2>/dev/null); then printf '%s' "$out"; else printf '%s' "$2"; fi; }
+            VIEWS=$(fetch "repos/${ORG}/${repo}/traffic/views" '{"count":0,"uniques":0,"views":[]}')
+            CLONES=$(fetch "repos/${ORG}/${repo}/traffic/clones" '{"count":0,"uniques":0,"clones":[]}')
+            REFS=$(fetch "repos/${ORG}/${repo}/traffic/popular/referrers" '[]')
+            PATHS=$(fetch "repos/${ORG}/${repo}/traffic/popular/paths" '[]')
 
             V_TOTAL=$(echo "$VIEWS" | jq -r '.count // 0')
             V_UNIQ=$(echo "$VIEWS" | jq -r '.uniques // 0')
