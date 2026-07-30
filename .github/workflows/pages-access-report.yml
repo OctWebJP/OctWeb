@@ -1,0 +1,73 @@
+name: Daily GitHub Pages access report
+
+on:
+  schedule:
+    # 09:00 JST = 00:00 UTC, daily
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: [hanasaki, shionoya, OctWeb]
+    steps:
+      - name: Generate and post traffic report
+        env:
+          # Needs `repo` scope on all three Pages repos (traffic API requires push access).
+          # Store a fine-grained or classic PAT as the org secret PAGES_REPORT_TOKEN.
+          GH_TOKEN: ${{ secrets.PAGES_REPORT_TOKEN }}
+          OWNER: OctWebJP
+          REPO: ${{ matrix.repo }}
+        run: |
+          set -euo pipefail
+          DATE=$(date -u +%Y-%m-%d)
+          YDAY=$(date -u -d "yesterday" +%Y-%m-%d)
+
+          VIEWS=$(gh api "repos/$OWNER/$REPO/traffic/views")
+          CLONES=$(gh api "repos/$OWNER/$REPO/traffic/clones")
+          PATHS=$(gh api "repos/$OWNER/$REPO/traffic/popular/paths")
+          REFS=$(gh api "repos/$OWNER/$REPO/traffic/popular/referrers")
+          PAGES_URL=$(gh api "repos/$OWNER/$REPO/pages" --jq .html_url)
+
+          TOTAL_VIEWS=$(echo "$VIEWS" | jq -r '.count')
+          UNIQUE_VIEWS=$(echo "$VIEWS" | jq -r '.uniques')
+          Y_VIEWS=$(echo "$VIEWS" | jq -r --arg d "$YDAY" \
+            '.views[] | select(.timestamp|startswith($d)) | "\(.count) views / \(.uniques) uniques"')
+          [ -z "$Y_VIEWS" ] && Y_VIEWS="0 views / 0 uniques"
+
+          TOTAL_CLONES=$(echo "$CLONES" | jq -r '.count')
+          UNIQUE_CLONES=$(echo "$CLONES" | jq -r '.uniques')
+
+          PATHS_MD=$(echo "$PATHS" | jq -r 'if length==0 then "_(none)_" else (.[] | "- `\(.path)` — \(.count) views, \(.uniques) uniques") end')
+          REFS_MD=$(echo "$REFS"  | jq -r 'if length==0 then "_(none)_" else (.[] | "- **\(.referrer)** — \(.count) views, \(.uniques) uniques") end')
+
+          TITLE="📊 GitHub Pages access report — $DATE"
+          BODY=$(cat <<EOF
+          Daily traffic analysis for **$PAGES_URL**
+          _Window: last 14 days (GitHub Traffic API — Pages does not expose raw access logs)_
+
+          ## Summary (last 14 days)
+          - **Total views:** $TOTAL_VIEWS
+          - **Unique visitors:** $UNIQUE_VIEWS
+          - **Yesterday ($YDAY):** $Y_VIEWS
+          - **Clones:** $TOTAL_CLONES (uniques: $UNIQUE_CLONES)
+
+          ## Popular paths
+          $PATHS_MD
+
+          ## Top referrers
+          $REFS_MD
+
+          ---
+          > ℹ️ GitHub Pages does not provide raw HTTP access logs. This report uses the repository Traffic API as the closest proxy. For full server logs, front the site with a CDN (e.g., Cloudflare) or use client-side analytics.
+          > 🤖 Auto-generated daily by \`.github/workflows/pages-access-report.yml\` in OctWebJP/OctWeb.
+          EOF
+          )
+
+          gh issue create -R "$OWNER/$REPO" --title "$TITLE" --body "$BODY"
