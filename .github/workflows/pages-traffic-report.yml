@@ -2,96 +2,88 @@ name: Daily GitHub Pages Traffic Report
 
 on:
   schedule:
-    - cron: '5 0 * * *'  # 00:05 UTC every day
+    - cron: '0 0 * * *'   # daily 00:00 UTC (09:00 JST)
   workflow_dispatch:
 
 permissions:
-  issues: write
   contents: read
+  issues: write
 
 jobs:
   report:
     runs-on: ubuntu-latest
     steps:
-      - name: Generate traffic report and open issue
+      - name: Build report and open issue
         env:
-          # PAT with `repo` scope on all Pages-enabled repos (traffic API requires push access).
-          # Falls back to GITHUB_TOKEN, which only works for this repo.
-          GH_TOKEN: ${{ secrets.TRAFFIC_READ_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ORG: OctWebJP
         run: |
           set -euo pipefail
-          DATE=$(date -u +%Y-%m-%d)
-          REPORT=$(mktemp)
+          today=$(date -u +%Y-%m-%d)
+
+          # Discover Pages-enabled repos in the org.
+          repos=$(gh api "/orgs/${ORG}/repos" --paginate -q '.[] | select(.has_pages==true) | .name')
 
           {
-            echo "# GitHub Pages traffic report — ${DATE}"
-            echo
-            echo "Source: GitHub Traffic API (\`/repos/{owner}/{repo}/traffic/*\`). GitHub Pages does not expose raw access logs; this is the closest equivalent GitHub provides. Traffic data covers the last 14 days."
-            echo
-          } > "$REPORT"
+            echo "# GitHub Pages Traffic Report — ${today}"
+            echo ""
+            echo "Source: GitHub Traffic API (14-day rolling window). GitHub Pages does not expose raw web-server access logs; this is the closest available signal."
+            echo ""
+          } > report.md
 
-          # Discover pages-enabled repos in the org
-          REPOS=$(gh api --paginate "orgs/${ORG}/repos" --jq '.[] | select(.has_pages==true) | .name')
+          for repo in $repos; do
+            echo "Processing ${ORG}/${repo}"
+            views_json=$(gh api "/repos/${ORG}/${repo}/traffic/views" 2>/dev/null || echo '{}')
+            clones_json=$(gh api "/repos/${ORG}/${repo}/traffic/clones" 2>/dev/null || echo '{}')
+            paths_json=$(gh api "/repos/${ORG}/${repo}/traffic/popular/paths" 2>/dev/null || echo '[]')
+            refs_json=$(gh api "/repos/${ORG}/${repo}/traffic/popular/referrers" 2>/dev/null || echo '[]')
 
-          if [ -z "$REPOS" ]; then
-            echo "_No GitHub Pages sites found in \`${ORG}\`._" >> "$REPORT"
-          fi
-
-          for repo in $REPOS; do
-            echo "Processing $repo..."
-            fetch() { local out; if out=$(gh api "$1" 2>/dev/null); then printf '%s' "$out"; else printf '%s' "$2"; fi; }
-            VIEWS=$(fetch "repos/${ORG}/${repo}/traffic/views" '{"count":0,"uniques":0,"views":[]}')
-            CLONES=$(fetch "repos/${ORG}/${repo}/traffic/clones" '{"count":0,"uniques":0,"clones":[]}')
-            REFS=$(fetch "repos/${ORG}/${repo}/traffic/popular/referrers" '[]')
-            PATHS=$(fetch "repos/${ORG}/${repo}/traffic/popular/paths" '[]')
-
-            V_TOTAL=$(echo "$VIEWS" | jq -r '.count // 0')
-            V_UNIQ=$(echo "$VIEWS" | jq -r '.uniques // 0')
-            YESTERDAY=$(date -u -d 'yesterday' +%Y-%m-%d 2>/dev/null || date -u -v-1d +%Y-%m-%d)
-            V_Y=$(echo "$VIEWS" | jq -r --arg d "$YESTERDAY" '[.views[]? | select(.timestamp|startswith($d))] | (.[0].count // 0)')
-            VU_Y=$(echo "$VIEWS" | jq -r --arg d "$YESTERDAY" '[.views[]? | select(.timestamp|startswith($d))] | (.[0].uniques // 0)')
+            v_total=$(echo "$views_json" | jq -r '.count // 0')
+            v_unique=$(echo "$views_json" | jq -r '.uniques // 0')
+            v_yesterday=$(echo "$views_json" | jq -r --arg d "$(date -u -d 'yesterday' +%Y-%m-%d)" \
+              '.views // [] | map(select(.timestamp|startswith($d))) | (.[0].count // 0)')
+            vu_yesterday=$(echo "$views_json" | jq -r --arg d "$(date -u -d 'yesterday' +%Y-%m-%d)" \
+              '.views // [] | map(select(.timestamp|startswith($d))) | (.[0].uniques // 0)')
 
             {
-              echo "## ${ORG}/${repo}"
-              echo "- Site: https://${ORG,,}.github.io/${repo}/"
-              echo "- Views (14d): **${V_TOTAL}** total, **${V_UNIQ}** unique visitors"
-              echo "- Views (${YESTERDAY}): **${V_Y}** total, **${VU_Y}** unique"
-              echo "- Clones (14d): **$(echo "$CLONES" | jq -r '.count // 0')** total, **$(echo "$CLONES" | jq -r '.uniques // 0')** unique"
-              echo
-              echo "### Top referrers (14d)"
-              REF_TBL=$(echo "$REFS" | jq -r '.[] | "| \(.referrer) | \(.count) | \(.uniques) |"')
-              if [ -n "$REF_TBL" ]; then
-                echo "| Referrer | Views | Unique |"
-                echo "|---|---:|---:|"
-                echo "$REF_TBL"
-              else
-                echo "_No referrer data._"
-              fi
-              echo
+              echo "## ${repo}"
+              echo ""
+              echo "- Pages URL: https://${ORG,,}.github.io/${repo}/"
+              echo "- Views (14d): **${v_total}** total / **${v_unique}** unique"
+              echo "- Views (yesterday UTC): **${v_yesterday}** total / **${vu_yesterday}** unique"
+              echo ""
               echo "### Top paths (14d)"
-              PATH_TBL=$(echo "$PATHS" | jq -r '.[] | "| `\(.path)` | \(.title // "") | \(.count) | \(.uniques) |"')
-              if [ -n "$PATH_TBL" ]; then
-                echo "| Path | Title | Views | Unique |"
-                echo "|---|---|---:|---:|"
-                echo "$PATH_TBL"
-              else
-                echo "_No path data._"
-              fi
-              echo
-              echo "### Daily views (14d)"
-              echo "| Date | Views | Unique |"
+              echo "| Path | Views | Uniques |"
               echo "|---|---:|---:|"
-              echo "$VIEWS" | jq -r '.views[]? | "| \(.timestamp[0:10]) | \(.count) | \(.uniques) |"'
-              echo
-            } >> "$REPORT"
+              echo "$paths_json" | jq -r '.[]? | "| `\(.path)` | \(.count) | \(.uniques) |"' | head -10
+              [ -z "$(echo "$paths_json" | jq -r '.[]?')" ] && echo "| _no data_ | 0 | 0 |"
+              echo ""
+              echo "### Top referrers (14d)"
+              echo "| Referrer | Views | Uniques |"
+              echo "|---|---:|---:|"
+              echo "$refs_json" | jq -r '.[]? | "| \(.referrer) | \(.count) | \(.uniques) |"' | head -10
+              [ -z "$(echo "$refs_json" | jq -r '.[]?')" ] && echo "| _no data_ | 0 | 0 |"
+              echo ""
+              c_total=$(echo "$clones_json" | jq -r '.count // 0')
+              c_unique=$(echo "$clones_json" | jq -r '.uniques // 0')
+              echo "- Repo clones (14d, for reference): ${c_total} / ${c_unique} unique"
+              echo ""
+            } >> report.md
           done
 
-          echo "--- report follows ---"
-          cat "$REPORT"
+          {
+            echo "### Analysis"
+            echo ""
+            top_repo=$(for repo in $repos; do
+              v=$(gh api "/repos/${ORG}/${repo}/traffic/views" -q '.count // 0' 2>/dev/null || echo 0)
+              echo "$v $repo"
+            done | sort -rn | head -1)
+            echo "- Highest-traffic site (14d views): **$(echo "$top_repo" | awk '{print $2}')** with $(echo "$top_repo" | awk '{print $1}') views."
+            echo "- Report generated automatically by \`.github/workflows/pages-traffic-report.yml\`."
+          } >> report.md
 
           gh issue create \
             --repo "${ORG}/OctWeb" \
-            --title "Pages traffic report — ${DATE}" \
-            --label "traffic-report" \
-            --body-file "$REPORT"
+            --title "Pages traffic report — ${today}" \
+            --label "pages-traffic" \
+            --body-file report.md
