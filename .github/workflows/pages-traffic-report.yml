@@ -15,85 +15,132 @@ jobs:
     steps:
       - name: Build report and open issue
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional PAT (classic, scope: repo) or fine-grained token with
+          # "Administration: Read" on this repo. Required for the Traffic API.
+          TRAFFIC_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+          FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           TODAY=$(date -u +%Y-%m-%d)
           YDAY=$(date -u -d "yesterday" +%Y-%m-%dT00:00:00Z)
+          SITE_HOST=$(echo "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')
+          SITE_PATH="${REPO#*/}"
+          SITE_URL="https://${SITE_HOST}.github.io/${SITE_PATH}/"
 
-          VIEWS=$(gh api "repos/$REPO/traffic/views")
-          PATHS=$(gh api "repos/$REPO/traffic/popular/paths")
-          REFS=$(gh api "repos/$REPO/traffic/popular/referrers")
-          CLONES=$(gh api "repos/$REPO/traffic/clones" || echo '{"count":0,"uniques":0}')
+          # Prefer PAT for traffic API; fall back to GITHUB_TOKEN just to probe.
+          T="${TRAFFIC_TOKEN:-$FALLBACK_TOKEN}"
 
-          TC=$(jq -r '.count'   <<<"$VIEWS")
-          TU=$(jq -r '.uniques' <<<"$VIEWS")
-          YC=$(jq -r --arg d "$YDAY" '[.views[]|select(.timestamp==$d)][0].count   // 0' <<<"$VIEWS")
-          YU=$(jq -r --arg d "$YDAY" '[.views[]|select(.timestamp==$d)][0].uniques // 0' <<<"$VIEWS")
-          CC=$(jq -r '.count'   <<<"$CLONES")
-          CU=$(jq -r '.uniques' <<<"$CLONES")
+          probe=$(curl -sS -o /tmp/views.json -w '%{http_code}' \
+            -H "Authorization: Bearer $T" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/traffic/views")
 
-          {
-            echo "# 📊 GitHub Pages Traffic Report — $TODAY"
-            echo
-            echo "**Repository:** \`$REPO\`  "
-            echo "**Pages site:** https://octwebjp.github.io/${REPO#*/}/"
-            echo
-            echo "## Yesterday ($YDAY)"
-            echo "| Metric | Value |"
-            echo "|---|---|"
-            echo "| Views | $YC |"
-            echo "| Unique visitors | $YU |"
-            echo
-            echo "## Rolling 14-day totals"
-            echo "| Metric | Value |"
-            echo "|---|---|"
-            echo "| Views | $TC |"
-            echo "| Unique visitors | $TU |"
-            echo "| Clones | $CC (unique: $CU) |"
-            echo
-            echo "## Top paths (14d)"
-            if [ "$(jq 'length' <<<"$PATHS")" = "0" ]; then
-              echo "_No path data yet._"
-            else
-              echo "| Path | Views | Uniques |"
-              echo "|---|---:|---:|"
-              jq -r '.[] | "| `\(.path)` | \(.count) | \(.uniques) |"' <<<"$PATHS"
-            fi
-            echo
-            echo "## Top referrers (14d)"
-            if [ "$(jq 'length' <<<"$REFS")" = "0" ]; then
-              echo "_No referrer data yet._"
-            else
-              echo "| Referrer | Views | Uniques |"
-              echo "|---|---:|---:|"
-              jq -r '.[] | "| **\(.referrer)** | \(.count) | \(.uniques) |"' <<<"$REFS"
-            fi
-            echo
-            echo "## Analysis"
-            if [ "$YC" -gt 0 ]; then
-              echo "- Yesterday recorded **$YC views** from **$YU unique visitors**."
-            else
-              echo "- No traffic recorded for yesterday."
-            fi
+          if [ "$probe" != "200" ]; then
+            {
+              echo "# ⚠️ Pages Traffic Report — $TODAY (setup required)"
+              echo
+              echo "The daily traffic report workflow ran, but could not read the Traffic API for **\`$REPO\`** (HTTP $probe)."
+              echo
+              echo "## Why"
+              echo "The default \`GITHUB_TOKEN\` cannot access \`/repos/{owner}/{repo}/traffic/*\`. A **Personal Access Token** with \`repo\` scope (classic) — or a fine-grained token with **Administration: Read** on this repository — is required."
+              echo
+              echo "## Fix (one-time)"
+              echo "1. Create a PAT: https://github.com/settings/tokens"
+              echo "2. In this repo → **Settings → Secrets and variables → Actions → New repository secret**"
+              echo "3. Name it \`TRAFFIC_TOKEN\` and paste the PAT."
+              echo "4. Re-run the workflow: **Actions → Pages Traffic Report → Run workflow**."
+              echo
+              echo "> Note: GitHub Pages does not expose raw access logs. This report is derived from the Repository Traffic API (rolling 14-day window)."
+            } > report.md
+            TITLE="⚠️ Pages Traffic Report — $TODAY (setup required)"
+            LABEL="traffic-report"
+          else
+            VIEWS=$(cat /tmp/views.json)
+            PATHS=$(curl -sS -H "Authorization: Bearer $T" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/traffic/popular/paths")
+            REFS=$(curl -sS -H "Authorization: Bearer $T" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/traffic/popular/referrers")
+            CLONES=$(curl -sS -H "Authorization: Bearer $T" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/traffic/clones" || echo '{"count":0,"uniques":0}')
+
+            TC=$(jq -r '.count'   <<<"$VIEWS")
+            TU=$(jq -r '.uniques' <<<"$VIEWS")
+            YC=$(jq -r --arg d "$YDAY" '[.views[]|select(.timestamp==$d)][0].count   // 0' <<<"$VIEWS")
+            YU=$(jq -r --arg d "$YDAY" '[.views[]|select(.timestamp==$d)][0].uniques // 0' <<<"$VIEWS")
+            CC=$(jq -r '.count'   <<<"$CLONES")
+            CU=$(jq -r '.uniques' <<<"$CLONES")
             AVG=$(( TC / 14 ))
-            echo "- 14-day daily average: **~$AVG views/day**."
-            if [ "$YC" -gt "$AVG" ] && [ "$AVG" -gt 0 ]; then
-              echo "- 📈 Yesterday was **above** the 14-day average."
-            elif [ "$YC" -lt "$AVG" ]; then
-              echo "- 📉 Yesterday was **below** the 14-day average."
-            fi
-            echo
-            echo "---"
-            echo "> ℹ️ GitHub Pages does not expose raw HTTP access logs. This report is derived from the Repository Traffic API, which returns rolling 14-day view/referrer/path data. For per-request logs, add a client-side analytics tag (e.g. GoUATAG, Plausible) or front the site with a CDN that provides logs."
-          } > report.md
+
+            {
+              echo "# 📊 GitHub Pages Traffic Report — $TODAY"
+              echo
+              echo "**Repository:** \`$REPO\`  "
+              echo "**Pages site:** $SITE_URL"
+              echo
+              echo "## Yesterday ($YDAY)"
+              echo "| Metric | Value |"
+              echo "|---|---|"
+              echo "| Views | $YC |"
+              echo "| Unique visitors | $YU |"
+              echo
+              echo "## Rolling 14-day totals"
+              echo "| Metric | Value |"
+              echo "|---|---|"
+              echo "| Views | $TC |"
+              echo "| Unique visitors | $TU |"
+              echo "| Clones | $CC (unique: $CU) |"
+              echo "| Daily avg views | ~$AVG |"
+              echo
+              echo "## Top paths (14d)"
+              if [ "$(jq 'length' <<<"$PATHS")" = "0" ]; then
+                echo "_No path data yet._"
+              else
+                echo "| Path | Views | Uniques |"
+                echo "|---|---:|---:|"
+                jq -r '.[] | "| `\(.path)` | \(.count) | \(.uniques) |"' <<<"$PATHS"
+              fi
+              echo
+              echo "## Top referrers (14d)"
+              if [ "$(jq 'length' <<<"$REFS")" = "0" ]; then
+                echo "_No referrer data yet._"
+              else
+                echo "| Referrer | Views | Uniques |"
+                echo "|---|---:|---:|"
+                jq -r '.[] | "| **\(.referrer)** | \(.count) | \(.uniques) |"' <<<"$REFS"
+              fi
+              echo
+              echo "## Analysis"
+              if [ "$YC" -gt 0 ]; then
+                echo "- Yesterday recorded **$YC views** from **$YU unique visitors**."
+              else
+                echo "- No traffic recorded for yesterday."
+              fi
+              echo "- 14-day daily average: **~$AVG views/day**."
+              if [ "$AVG" -gt 0 ] && [ "$YC" -gt "$AVG" ]; then
+                echo "- 📈 Yesterday was **above** the 14-day average."
+              elif [ "$YC" -lt "$AVG" ]; then
+                echo "- 📉 Yesterday was **below** the 14-day average."
+              fi
+              echo
+              echo "---"
+              echo "> ℹ️ GitHub Pages does not expose raw HTTP access logs. This report is derived from the Repository Traffic API, which returns a rolling 14-day window of views, unique visitors, top paths, and referrers. For per-request logging, add a client-side analytics tag (Plausible, Umami, GA4) or front the site with a CDN."
+            } > report.md
+            TITLE="Pages Traffic Report — $TODAY"
+            LABEL="traffic-report"
+          fi
 
           # Ensure label exists (best-effort)
-          gh label create traffic-report --repo "$REPO" --color "0E8A16" \
-            --description "Automated GitHub Pages traffic reports" 2>/dev/null || true
+          curl -sS -o /dev/null -X POST \
+            -H "Authorization: Bearer $FALLBACK_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/labels" \
+            -d '{"name":"traffic-report","color":"0E8A16","description":"Automated GitHub Pages traffic reports"}' || true
 
-          gh issue create --repo "$REPO" \
-            --title "Pages Traffic Report — $TODAY" \
-            --body-file report.md \
-            --label traffic-report
+          BODY=$(jq -Rs . < report.md)
+          curl -sS -X POST \
+            -H "Authorization: Bearer $FALLBACK_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/issues" \
+            -d "{\"title\": $(jq -Rn --arg t "$TITLE" '$t'), \"body\": $BODY, \"labels\":[\"$LABEL\"]}" \
+            | jq '{number, html_url}'
