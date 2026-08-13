@@ -1,0 +1,61 @@
+name: Daily Pages Access Report
+
+on:
+  schedule:
+    - cron: '15 1 * * *'  # 10:15 JST daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate & file report
+        env:
+          GH_TOKEN: ${{ secrets.ORG_TRAFFIC_TOKEN || secrets.GITHUB_TOKEN }}
+          ORG: OctWebJP
+        run: |
+          set -euo pipefail
+          TODAY=$(TZ=Asia/Tokyo date +%F)
+          REPORT=$(mktemp)
+
+          mapfile -t REPOS < <(gh api "orgs/$ORG/repos" --paginate --jq '.[] | select(.has_pages) | .name')
+
+          {
+            echo "# GitHub Pages Access Report — $TODAY"
+            echo
+            echo "Source: GitHub Traffic API (\`/repos/{owner}/{repo}/traffic/views\` — last 14 days). GitHub Pages does not expose raw access logs."
+            echo
+            echo "## Summary (14-day totals)"
+            echo
+            echo "| Repo | Pages URL | Views | Unique visitors |"
+            echo "|---|---|---:|---:|"
+            for r in "${REPOS[@]}"; do
+              V=$(gh api "repos/$ORG/$r/traffic/views")
+              URL=$(gh api "repos/$ORG/$r/pages" --jq '.html_url' 2>/dev/null || echo "-")
+              C=$(echo "$V" | jq -r '.count')
+              U=$(echo "$V" | jq -r '.uniques')
+              echo "| $r | $URL | $C | $U |"
+            done
+            echo
+            for r in "${REPOS[@]}"; do
+              V=$(gh api "repos/$ORG/$r/traffic/views")
+              URL=$(gh api "repos/$ORG/$r/pages" --jq '.html_url' 2>/dev/null || echo "-")
+              echo "## $r — $URL"
+              echo
+              echo "| Date | Views | Uniques |"
+              echo "|---|---:|---:|"
+              echo "$V" | jq -r '.views[] | "| \(.timestamp[:10]) | \(.count) | \(.uniques) |"'
+              echo
+            done
+            echo "---"
+            echo "_Auto-generated daily by \`.github/workflows/pages-access-report.yml\`. Note: GitHub Pages does not surface raw request-level access logs; this report uses aggregated Traffic API data._"
+          } > "$REPORT"
+
+          gh issue create \
+            --repo "$ORG/OctWeb" \
+            --title "Pages Access Analysis — $TODAY" \
+            --body-file "$REPORT"
