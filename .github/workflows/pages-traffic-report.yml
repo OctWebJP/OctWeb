@@ -17,7 +17,7 @@ jobs:
         env:
           # Optional PAT (classic, scope: repo) or fine-grained token with
           # "Administration: Read" on this repo. Required for the Traffic API.
-          TRAFFIC_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+          TRAFFIC_TOKEN: ${{ secrets.PAGES_TRAFFIC_TOKEN }}
           FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
