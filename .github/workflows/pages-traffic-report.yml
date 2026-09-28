@@ -1,8 +1,8 @@
-name: Pages Traffic Report
+name: Daily GitHub Pages Traffic Report
 
 on:
   schedule:
-    - cron: '10 0 * * *'   # daily 00:10 UTC (09:10 JST)
+    - cron: '5 0 * * *'  # 00:05 UTC = 09:05 JST
   workflow_dispatch:
 
 permissions:
@@ -13,20 +13,58 @@ jobs:
   report:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Build org-wide Pages traffic report and open issue
+      - name: Generate and file report
         env:
-          # PAT with `repo` scope (classic) or fine-grained token with
-          # Administration: Read on every Pages-enabled repo in the org,
-          # plus Issues: Write on the issue repo. Required for /traffic/*.
-          GH_TOKEN: ${{ secrets.PAGES_TRAFFIC_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ORG: OctWebJP
-          ISSUE_REPO: OctWeb
+          REPOS: "hanasaki shionoya OctWeb"
         run: |
           set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::PAGES_TRAFFIC_TOKEN secret is not set. The default GITHUB_TOKEN cannot read /traffic/*."
-            exit 1
-          fi
-          python3 scripts/pages_traffic_report.py
+          DATE=$(date -u +%Y-%m-%d)
+          OUT=$(mktemp)
+          {
+            echo "# GitHub Pages Traffic Report — $DATE (UTC)"
+            echo
+            echo "Rolling 14-day window from the GitHub Traffic API. GitHub Pages does not expose raw HTTP access logs; this uses repository traffic (views, unique visitors, clones, popular paths, referrers) as the closest available signal."
+            echo
+            TOT_V=0; TOT_U=0; TOT_C=0; TOT_CU=0
+            for R in $REPOS; do
+              V=$(gh api "repos/$ORG/$R/traffic/views")
+              C=$(gh api "repos/$ORG/$R/traffic/clones")
+              P=$(gh api "repos/$ORG/$R/traffic/popular/paths")
+              REF=$(gh api "repos/$ORG/$R/traffic/popular/referrers")
+              vc=$(echo "$V" | jq -r '.count'); vu=$(echo "$V" | jq -r '.uniques')
+              cc=$(echo "$C" | jq -r '.count'); cu=$(echo "$C" | jq -r '.uniques')
+              yv=$(echo "$V" | jq -r --arg d "$(date -u -d 'yesterday' +%Y-%m-%d)" '.views[] | select(.timestamp|startswith($d)) | "\(.count)/\(.uniques)"')
+              yv=${yv:-0/0}
+              TOT_V=$((TOT_V+vc)); TOT_U=$((TOT_U+vu)); TOT_C=$((TOT_C+cc)); TOT_CU=$((TOT_CU+cu))
+              echo "## $ORG/$R  •  https://$(echo $ORG | tr '[:upper:]' '[:lower:]').github.io/$R/"
+              echo
+              echo "| Metric | 14-day total | 14-day unique | Yesterday (views/uniques) |"
+              echo "|---|---:|---:|---:|"
+              echo "| Views | $vc | $vu | $yv |"
+              echo "| Clones | $cc | $cu | — |"
+              echo
+              echo "**Top paths (14d)**"
+              echo "$P" | jq -r 'if length==0 then "_no data_" else (["Path","Views","Uniques"], ["---","---:","---:"], (.[] | [.path, .count, .uniques])) | @tsv end' \
+                | awk -F'\t' 'BEGIN{OFS=" | "}{print "| " $1 " | " $2 " | " $3 " |"}'
+              echo
+              echo "**Top referrers (14d)**"
+              echo "$REF" | jq -r 'if length==0 then "_no data_" else (["Referrer","Views","Uniques"], ["---","---:","---:"], (.[] | [.referrer, .count, .uniques])) | @tsv end' \
+                | awk -F'\t' 'BEGIN{OFS=" | "}{print "| " $1 " | " $2 " | " $3 " |"}'
+              echo
+            done
+            echo "---"
+            echo "## Org totals (14d)"
+            echo
+            echo "| Views | Unique visitors | Clones | Unique cloners |"
+            echo "|---:|---:|---:|---:|"
+            echo "| $TOT_V | $TOT_U | $TOT_C | $TOT_CU |"
+            echo
+            echo "> _Note: GitHub Pages itself has no access-log API. For true request-level logs, front the site with a proxy (e.g., Cloudflare) or embed a client-side analytics tag._"
+          } > "$OUT"
+          gh issue create \
+            --repo "$ORG/OctWeb" \
+            --title "Pages traffic report — $DATE" \
+            --label "pages-report" \
+            --body-file "$OUT"
