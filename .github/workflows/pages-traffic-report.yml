@@ -1,8 +1,20 @@
 name: Daily GitHub Pages Traffic Report
 
+# Files a daily issue in this repo summarizing GitHub Pages / repo traffic
+# (views, unique visitors, clones, popular paths, referrers — 14-day rolling
+# window) for every Pages-enabled repo in the OctWebJP org.
+#
+# Setup (one-time):
+#   The GitHub Traffic API requires push/admin access to each target repo,
+#   and GITHUB_TOKEN is scoped to only THIS repo. Create a fine-grained PAT
+#   with "Administration: Read" (or classic PAT with `repo` scope) that can
+#   read OctWebJP/hanasaki, OctWebJP/shionoya, and OctWebJP/OctWeb, then add
+#   it as an Actions secret named PAGES_TRAFFIC_TOKEN in this repo.
+#   Without it, only OctWeb's own numbers will populate.
+
 on:
   schedule:
-    - cron: '5 0 * * *'  # 00:05 UTC = 09:05 JST
+    - cron: '5 0 * * *'   # daily at 00:05 UTC (09:05 JST)
   workflow_dispatch:
 
 permissions:
@@ -15,13 +27,15 @@ jobs:
     steps:
       - name: Generate and file report
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAGES_TRAFFIC_TOKEN || secrets.GITHUB_TOKEN }}
           ORG: OctWebJP
           REPOS: "hanasaki shionoya OctWeb"
         run: |
           set -euo pipefail
           DATE=$(date -u +%Y-%m-%d)
+          YDAY=$(date -u -d 'yesterday' +%Y-%m-%d)
           OUT=$(mktemp)
+          fetch() { gh api "$1" 2>/dev/null || echo "$2"; }
           {
             echo "# GitHub Pages Traffic Report — $DATE (UTC)"
             echo
@@ -29,29 +43,33 @@ jobs:
             echo
             TOT_V=0; TOT_U=0; TOT_C=0; TOT_CU=0
             for R in $REPOS; do
-              V=$(gh api "repos/$ORG/$R/traffic/views")
-              C=$(gh api "repos/$ORG/$R/traffic/clones")
-              P=$(gh api "repos/$ORG/$R/traffic/popular/paths")
-              REF=$(gh api "repos/$ORG/$R/traffic/popular/referrers")
+              V=$(fetch "repos/$ORG/$R/traffic/views" '{"count":0,"uniques":0,"views":[]}')
+              C=$(fetch "repos/$ORG/$R/traffic/clones" '{"count":0,"uniques":0,"clones":[]}')
+              P=$(fetch "repos/$ORG/$R/traffic/popular/paths" '[]')
+              REF=$(fetch "repos/$ORG/$R/traffic/popular/referrers" '[]')
               vc=$(echo "$V" | jq -r '.count'); vu=$(echo "$V" | jq -r '.uniques')
               cc=$(echo "$C" | jq -r '.count'); cu=$(echo "$C" | jq -r '.uniques')
-              yv=$(echo "$V" | jq -r --arg d "$(date -u -d 'yesterday' +%Y-%m-%d)" '.views[] | select(.timestamp|startswith($d)) | "\(.count)/\(.uniques)"')
-              yv=${yv:-0/0}
+              yv=$(echo "$V" | jq -r --arg d "$YDAY" '[.views[]? | select(.timestamp|startswith($d))] | if length==0 then "0/0" else "\(.[0].count)/\(.[0].uniques)" end')
               TOT_V=$((TOT_V+vc)); TOT_U=$((TOT_U+vu)); TOT_C=$((TOT_C+cc)); TOT_CU=$((TOT_CU+cu))
-              echo "## $ORG/$R  •  https://$(echo $ORG | tr '[:upper:]' '[:lower:]').github.io/$R/"
+              LC=$(echo "$ORG" | tr '[:upper:]' '[:lower:]')
+              echo "## $ORG/$R  •  https://$LC.github.io/$R/"
               echo
-              echo "| Metric | 14-day total | 14-day unique | Yesterday (views/uniques) |"
+              echo "| Metric | 14-day total | 14-day unique | Yesterday ($YDAY) views/uniques |"
               echo "|---|---:|---:|---:|"
               echo "| Views | $vc | $vu | $yv |"
               echo "| Clones | $cc | $cu | — |"
               echo
-              echo "**Top paths (14d)**"
-              echo "$P" | jq -r 'if length==0 then "_no data_" else (["Path","Views","Uniques"], ["---","---:","---:"], (.[] | [.path, .count, .uniques])) | @tsv end' \
-                | awk -F'\t' 'BEGIN{OFS=" | "}{print "| " $1 " | " $2 " | " $3 " |"}'
+              echo "**Top paths (14d)**"; echo
+              if [ "$(echo "$P" | jq 'length')" = "0" ]; then echo "_no data_"; else
+                echo "| Path | Views | Uniques |"; echo "|---|---:|---:|"
+                echo "$P" | jq -r '.[] | "| \(.path) | \(.count) | \(.uniques) |"'
+              fi
               echo
-              echo "**Top referrers (14d)**"
-              echo "$REF" | jq -r 'if length==0 then "_no data_" else (["Referrer","Views","Uniques"], ["---","---:","---:"], (.[] | [.referrer, .count, .uniques])) | @tsv end' \
-                | awk -F'\t' 'BEGIN{OFS=" | "}{print "| " $1 " | " $2 " | " $3 " |"}'
+              echo "**Top referrers (14d)**"; echo
+              if [ "$(echo "$REF" | jq 'length')" = "0" ]; then echo "_no data_"; else
+                echo "| Referrer | Views | Uniques |"; echo "|---|---:|---:|"
+                echo "$REF" | jq -r '.[] | "| \(.referrer) | \(.count) | \(.uniques) |"'
+              fi
               echo
             done
             echo "---"
@@ -61,7 +79,7 @@ jobs:
             echo "|---:|---:|---:|---:|"
             echo "| $TOT_V | $TOT_U | $TOT_C | $TOT_CU |"
             echo
-            echo "> _Note: GitHub Pages itself has no access-log API. For true request-level logs, front the site with a proxy (e.g., Cloudflare) or embed a client-side analytics tag._"
+            echo "> _Note: GitHub Pages itself has no access-log API. For request-level logs, front the site with a proxy (e.g., Cloudflare) or embed a client-side analytics tag such as Plausible or GoatCounter._"
           } > "$OUT"
           gh issue create \
             --repo "$ORG/OctWeb" \
