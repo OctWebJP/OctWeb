@@ -1,0 +1,116 @@
+name: Daily GitHub Pages Access Report
+
+on:
+  schedule:
+    # 00:10 UTC every day (~09:10 JST)
+    - cron: '10 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    env:
+      # A PAT with `repo` scope on OctWebJP/{hanasaki,shionoya,OctWeb} is required
+      # to read traffic across sibling repos. Falls back to GITHUB_TOKEN for the
+      # current repo only.
+      GH_TOKEN: ${{ secrets.PAGES_TRAFFIC_TOKEN || secrets.GITHUB_TOKEN }}
+      ORG: OctWebJP
+      REPOS: "hanasaki shionoya OctWeb"
+    steps:
+      - name: Generate report
+        run: |
+          set -euo pipefail
+          DATE=$(date -u +%Y-%m-%d)
+          echo "DATE=$DATE" >> "$GITHUB_ENV"
+          OUT=body.md
+          {
+            echo "# 📊 GitHub Pages Access Report — ${DATE}"
+            echo
+            echo "Automated daily analysis for GitHub Pages sites in the **${ORG}** organization."
+            echo "Source: GitHub Traffic API (past 14 days). *GitHub Pages does not expose raw access logs; this is the closest first-party signal.*"
+            echo
+            echo "## Summary (last 14 days)"
+            echo
+            echo "| Repo | Pages URL | Views | Unique visitors | Clones | Unique cloners |"
+            echo "|---|---|---:|---:|---:|---:|"
+            for r in $REPOS; do
+              url=$(gh api "repos/${ORG}/${r}/pages" --jq '.html_url' 2>/dev/null || echo "n/a")
+              v=$(gh api "repos/${ORG}/${r}/traffic/views" --jq '"\(.count)|\(.uniques)"' 2>/dev/null || echo "?|?")
+              c=$(gh api "repos/${ORG}/${r}/traffic/clones" --jq '"\(.count)|\(.uniques)"' 2>/dev/null || echo "?|?")
+              IFS='|' read -r vc vu <<<"$v"
+              IFS='|' read -r cc cu <<<"$c"
+              echo "| \`${r}\` | ${url} | ${vc} | ${vu} | ${cc} | ${cu} |"
+            done
+            echo
+            for r in $REPOS; do
+              echo "## \`${r}\`"
+              echo
+              echo "### Daily views"
+              echo "| Date | Views | Uniques |"
+              echo "|---|---:|---:|"
+              gh api "repos/${ORG}/${r}/traffic/views" \
+                --jq '.views[] | "| \(.timestamp[0:10]) | \(.count) | \(.uniques) |"' 2>/dev/null || echo "| _no access_ | | |"
+              echo
+              echo "### Daily clones"
+              echo "| Date | Clones | Uniques |"
+              echo "|---|---:|---:|"
+              gh api "repos/${ORG}/${r}/traffic/clones" \
+                --jq '.clones[] | "| \(.timestamp[0:10]) | \(.count) | \(.uniques) |"' 2>/dev/null || echo "| _no access_ | | |"
+              echo
+              echo "### Top paths"
+              paths=$(gh api "repos/${ORG}/${r}/traffic/popular/paths" 2>/dev/null || echo "[]")
+              if [ "$(echo "$paths" | jq 'length')" = "0" ]; then
+                echo "_No data._"
+              else
+                echo "| Path | Title | Views | Uniques |"
+                echo "|---|---|---:|---:|"
+                echo "$paths" | jq -r '.[] | "| `\(.path)` | \(.title) | \(.count) | \(.uniques) |"'
+              fi
+              echo
+              echo "### Top referrers"
+              refs=$(gh api "repos/${ORG}/${r}/traffic/popular/referrers" 2>/dev/null || echo "[]")
+              if [ "$(echo "$refs" | jq 'length')" = "0" ]; then
+                echo "_No data._"
+              else
+                echo "| Referrer | Views | Uniques |"
+                echo "|---|---:|---:|"
+                echo "$refs" | jq -r '.[] | "| \(.referrer) | \(.count) | \(.uniques) |"'
+              fi
+              echo
+            done
+            echo "## Analysis"
+            echo
+            total_views=0; total_clones=0
+            for r in $REPOS; do
+              v=$(gh api "repos/${ORG}/${r}/traffic/views" --jq '.count' 2>/dev/null || echo 0)
+              c=$(gh api "repos/${ORG}/${r}/traffic/clones" --jq '.count' 2>/dev/null || echo 0)
+              total_views=$((total_views + v))
+              total_clones=$((total_clones + c))
+            done
+            echo "- Combined 14-day Pages views across all repos: **${total_views}**"
+            echo "- Combined 14-day clones across all repos: **${total_clones}**"
+            echo "- Repos with zero Pages views over the window may need SEO/link promotion or are freshly published."
+            echo "- High clone counts with low Pages views suggest developer interest (repo browsing) rather than end-user site visits."
+            echo
+            echo "---"
+            echo "_Generated automatically on ${DATE} UTC by \`.github/workflows/daily-pages-report.yml\`._"
+          } > "$OUT"
+
+      - name: Ensure label exists
+        run: |
+          gh label create pages-report \
+            --repo "${{ github.repository }}" \
+            --color 0E8A16 \
+            --description "Daily GitHub Pages traffic analysis" 2>/dev/null || true
+
+      - name: Create issue
+        run: |
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "📊 GitHub Pages Access Report — ${DATE}" \
+            --body-file body.md \
+            --label "pages-report"
